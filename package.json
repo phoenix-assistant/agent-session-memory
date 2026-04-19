@@ -1,21 +1,37 @@
 {
-  "name": "agent-session-memory",
+  "name": "@phoenixaihub/agent-session-memory",
   "version": "1.0.0",
-  "description": "Session memory compression and replay plugin for OpenClaw",
+  "description": "Session memory compression and replay plugin for OpenClaw — persist context across agent sessions",
   "main": "dist/index.js",
+  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "bin": {
+    "agent-session-memory": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
-  "license": "MIT",
-  "dependencies": {
-    "better-sqlite3": "^11.7.0"
+  "keywords": [
+    "agent",
+    "memory",
+    "session",
+    "openclaw",
+    "llm",
+    "context",
+    "compression"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/phoenix-assistant/agent-session-memory"
   },
+  "license": "MIT",
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^25.6.0",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

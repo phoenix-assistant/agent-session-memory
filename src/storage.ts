@@ -1,105 +1,124 @@
-import Database from "better-sqlite3";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { join } from "path";
 import { randomUUID } from "crypto";
-import { Memory, MemoryCategory } from "./config.js";
+import { Memory, MemoryCategory, CompressedSession } from "./types.js";
 
+/**
+ * JSON-file-based storage engine — zero native dependencies.
+ * Stores one JSON file per agent in the configured directory.
+ */
 export class StorageEngine {
-  private db: Database.Database;
+  private dir: string;
 
-  constructor(dbPath: string = ":memory:") {
-    this.db = new Database(dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS memories (
-        id TEXT PRIMARY KEY,
-        agent_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        category TEXT NOT NULL,
-        content TEXT NOT NULL,
-        importance REAL NOT NULL,
-        access_count INTEGER DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        last_accessed_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_agent ON memories(agent_id);
-      CREATE INDEX IF NOT EXISTS idx_importance ON memories(importance);
-      CREATE INDEX IF NOT EXISTS idx_created ON memories(created_at);
-    `);
+  constructor(storagePath: string = ".agent-memory") {
+    this.dir = storagePath;
+    if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
   }
 
-  insert(agentId: string, sessionId: string, category: MemoryCategory, content: string, importance: number): Memory {
+  private agentFile(agentId: string): string {
+    return join(this.dir, `${agentId}.json`);
+  }
+
+  private load(agentId: string): Memory[] {
+    const f = this.agentFile(agentId);
+    if (!existsSync(f)) return [];
+    return JSON.parse(readFileSync(f, "utf-8"));
+  }
+
+  private save(agentId: string, memories: Memory[]): void {
+    writeFileSync(this.agentFile(agentId), JSON.stringify(memories, null, 2));
+  }
+
+  insert(agentId: string, sessionId: string, category: MemoryCategory, content: string, importance: number, keywords: string[] = []): Memory {
+    const memories = this.load(agentId);
     const now = Date.now();
-    const id = randomUUID();
-    this.db.prepare(
-      `INSERT INTO memories (id, agent_id, session_id, category, content, importance, access_count, created_at, last_accessed_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
-    ).run(id, agentId, sessionId, category, content, importance, now, now);
-    return { id, agentId, sessionId, category, content, importance, accessCount: 0, createdAt: now, lastAccessedAt: now };
+    const mem: Memory = {
+      id: randomUUID(),
+      agentId,
+      sessionId,
+      category,
+      content,
+      importance,
+      keywords,
+      accessCount: 0,
+      createdAt: now,
+      lastAccessedAt: now,
+    };
+    memories.push(mem);
+    this.save(agentId, memories);
+    return mem;
   }
 
   getByAgent(agentId: string, opts?: { minImportance?: number; limit?: number }): Memory[] {
-    let sql = `SELECT * FROM memories WHERE agent_id = ?`;
-    const params: unknown[] = [agentId];
+    let mems = this.load(agentId);
     if (opts?.minImportance !== undefined) {
-      sql += ` AND importance >= ?`;
-      params.push(opts.minImportance);
+      mems = mems.filter(m => m.importance >= opts.minImportance!);
     }
-    sql += ` ORDER BY importance DESC`;
-    if (opts?.limit) { sql += ` LIMIT ?`; params.push(opts.limit); }
-    return this.db.prepare(sql).all(...params).map(rowToMemory);
+    mems.sort((a, b) => b.importance - a.importance);
+    if (opts?.limit) mems = mems.slice(0, opts.limit);
+    return mems;
   }
 
-  getBySession(sessionId: string): Memory[] {
-    return this.db.prepare(`SELECT * FROM memories WHERE session_id = ?`).all(sessionId).map(rowToMemory);
+  getBySession(agentId: string, sessionId: string): Memory[] {
+    return this.load(agentId).filter(m => m.sessionId === sessionId);
   }
 
   search(agentId: string, keyword: string): Memory[] {
-    return this.db.prepare(`SELECT * FROM memories WHERE agent_id = ? AND content LIKE ? ORDER BY importance DESC`)
-      .all(agentId, `%${keyword}%`).map(rowToMemory);
+    const kw = keyword.toLowerCase();
+    return this.load(agentId)
+      .filter(m => m.content.toLowerCase().includes(kw) || m.keywords.some(k => k.includes(kw)))
+      .sort((a, b) => b.importance - a.importance);
   }
 
   getByTimeRange(agentId: string, from: number, to: number): Memory[] {
-    return this.db.prepare(`SELECT * FROM memories WHERE agent_id = ? AND created_at >= ? AND created_at <= ? ORDER BY created_at DESC`)
-      .all(agentId, from, to).map(rowToMemory);
+    return this.load(agentId).filter(m => m.createdAt >= from && m.createdAt <= to);
   }
 
-  recordAccess(id: string): void {
-    this.db.prepare(`UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?`).run(Date.now(), id);
+  recordAccess(agentId: string, id: string): void {
+    const mems = this.load(agentId);
+    const mem = mems.find(m => m.id === id);
+    if (mem) {
+      mem.accessCount++;
+      mem.lastAccessedAt = Date.now();
+      this.save(agentId, mems);
+    }
   }
 
-  updateImportance(id: string, importance: number): void {
-    this.db.prepare(`UPDATE memories SET importance = ? WHERE id = ?`).run(importance, id);
+  updateImportance(agentId: string, id: string, importance: number): void {
+    const mems = this.load(agentId);
+    const mem = mems.find(m => m.id === id);
+    if (mem) {
+      mem.importance = importance;
+      this.save(agentId, mems);
+    }
   }
 
-  delete(id: string): void {
-    this.db.prepare(`DELETE FROM memories WHERE id = ?`).run(id);
+  delete(agentId: string, id: string): void {
+    const mems = this.load(agentId).filter(m => m.id !== id);
+    this.save(agentId, mems);
   }
 
   deleteByAgent(agentId: string): void {
-    this.db.prepare(`DELETE FROM memories WHERE agent_id = ?`).run(agentId);
+    this.save(agentId, []);
   }
 
   all(agentId: string): Memory[] {
-    return this.db.prepare(`SELECT * FROM memories WHERE agent_id = ? ORDER BY created_at DESC`).all(agentId).map(rowToMemory);
+    return this.load(agentId).sort((a, b) => b.createdAt - a.createdAt);
   }
 
   count(agentId: string): number {
-    return (this.db.prepare(`SELECT COUNT(*) as c FROM memories WHERE agent_id = ?`).get(agentId) as { c: number }).c;
+    return this.load(agentId).length;
   }
 
-  close(): void {
-    this.db.close();
+  // Session compression storage
+  storeCompressedSession(session: CompressedSession): void {
+    const f = join(this.dir, `session-${session.sessionId}.json`);
+    writeFileSync(f, JSON.stringify(session, null, 2));
   }
-}
 
-function rowToMemory(row: any): Memory {
-  return {
-    id: row.id,
-    agentId: row.agent_id,
-    sessionId: row.session_id,
-    category: row.category,
-    content: row.content,
-    importance: row.importance,
-    accessCount: row.access_count,
-    createdAt: row.created_at,
-    lastAccessedAt: row.last_accessed_at,
-  };
+  loadCompressedSession(sessionId: string): CompressedSession | null {
+    const f = join(this.dir, `session-${sessionId}.json`);
+    if (!existsSync(f)) return null;
+    return JSON.parse(readFileSync(f, "utf-8"));
+  }
 }

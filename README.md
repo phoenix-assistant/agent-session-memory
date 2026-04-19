@@ -1,86 +1,117 @@
 # agent-session-memory
 
-Session memory compression and replay plugin for OpenClaw. Extracts facts, decisions, and preferences from conversations, stores them in SQLite, and replays relevant memories at session start.
+[![npm version](https://img.shields.io/npm/v/@phoenixaihub/agent-session-memory)](https://www.npmjs.com/package/@phoenixaihub/agent-session-memory)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-24%20passing-brightgreen)]()
+
+Session memory compression and replay plugin for [OpenClaw](https://openclaw.dev) — persist context across agent sessions.
+
+Applies the **claude-mem pattern**: compress session transcripts into structured memory, store in a lightweight JSON-file DB, and replay relevant context at session start. Zero native dependencies.
 
 ## Install
 
 ```bash
-npm install agent-session-memory
+npm install @phoenixaihub/agent-session-memory
 ```
 
-## Quick Start
+## CLI
 
-```typescript
-import { StorageEngine, SessionHook } from "agent-session-memory";
+```bash
+# Compress a session transcript into structured memories
+agent-session-memory compress session.txt --agent my-agent
 
-const storage = new StorageEngine("./memories.db");
-const hook = new SessionHook(storage);
-
-// At session end — extract and store memories
-hook.onSessionEnd("agent-1", "session-abc", conversationText);
-
-// At session start — inject relevant memories
-const memories = hook.onSessionStart("agent-1");
+# Recall memories by keyword
+agent-session-memory recall --query "database" --agent my-agent
 ```
 
 ## API
 
-### `StorageEngine`
-
-SQLite-backed storage with WAL mode.
-
 ```typescript
-new StorageEngine(dbPath?: string) // default: in-memory
+import { compress, recall, store, SessionHook, StorageEngine } from "@phoenixaihub/agent-session-memory";
+
+// Compress a session transcript
+const session = compress(transcriptText, "agent-id", "session-123");
+// => { sessionId, memories, summary, compressedAt }
+
+// Recall memories by keyword
+const memories = recall("TypeScript", "agent-id");
+
+// Store a single memory
+store("agent-id", "session-1", "decision", "Use PostgreSQL for storage", 0.8);
+
+// Full lifecycle via SessionHook
+const storage = new StorageEngine(".agent-memory");
+const hook = new SessionHook(storage);
+
+// Session start: get relevant context
+const context = hook.onSessionStart("agent-id");
+
+// Session end: extract and persist memories
+const extracted = hook.onSessionEnd("agent-id", "session-123", conversationText);
 ```
 
-| Method | Description |
-|--------|-------------|
-| `insert(agentId, sessionId, category, content, importance)` | Store a memory |
-| `getByAgent(agentId, opts?)` | Get memories by agent (filter by minImportance, limit) |
-| `getBySession(sessionId)` | Get memories from a session |
-| `search(agentId, keyword)` | Full-text keyword search |
-| `getByTimeRange(agentId, from, to)` | Query by timestamp range |
-| `recordAccess(id)` | Bump access count (boosts importance) |
-| `delete(id)` | Delete a memory |
+## Architecture
 
-### `SessionHook`
-
-Lifecycle hooks for session start/end.
-
-```typescript
-new SessionHook(storage, config?)
+```
+┌─────────────────┐
+│  Session Text    │
+└────────┬────────┘
+         │
+    ┌────▼────┐
+    │ TF-IDF  │  Keyword extraction (zero-dep)
+    │ Engine  │
+    └────┬────┘
+         │
+  ┌──────▼──────┐
+  │  Compressor  │  Pattern matching + entity extraction
+  │              │  Categories: decision, fact, preference,
+  │              │  instruction, tool_call, code_ref, context
+  └──────┬──────┘
+         │
+   ┌─────▼─────┐
+   │  Storage   │  JSON files per agent (zero native deps)
+   │  Engine    │
+   └─────┬─────┘
+         │
+   ┌─────▼─────┐
+   │   Decay    │  Time-decay + access-boost
+   │  Manager   │  Auto-prune low-importance memories
+   └───────────┘
 ```
 
-| Method | Description |
-|--------|-------------|
-| `onSessionStart(agentId, opts?)` | Returns relevant memories, runs decay |
-| `onSessionEnd(agentId, sessionId, text)` | Extracts and stores memories from conversation |
+### Memory Categories
 
-### `extractMemories(text)`
+| Category | Triggers | Importance |
+|----------|----------|------------|
+| `decision` | "decided", "agreed", "will go with" | 0.8 |
+| `instruction` | "always", "never", "remember to" | 0.9 |
+| `fact` | "my name is", "I work at" | 0.7 |
+| `preference` | "prefer", "like", "hate" | 0.6 |
+| `code_ref` | file paths, "function", "module" | 0.5-0.6 |
+| `tool_call` | "called", "invoked", "ran" | 0.5 |
+| `context` | fallback for unstructured text | 0.3 |
 
-Extracts structured memories from conversation text. Returns `{ category, content, importance }[]`.
+### Decay Model
 
-Categories: `fact`, `decision`, `preference`, `instruction`, `context`.
+Memories decay exponentially over time with a configurable half-life (default: 14 days). Frequently accessed memories get boosted. Memories below the prune threshold are automatically removed.
 
-### `DecayManager`
-
-Exponential time-decay with access-boost. Prunes memories below threshold.
-
-```typescript
-new DecayManager(storage, config?)
-decay(agentId): number // returns count pruned
+```
+effective_importance = base_importance × 0.5^(age/halfLife) × boost^accessCount
 ```
 
-### `MemoryConfig`
+## Configuration
 
 ```typescript
+import { DEFAULT_CONFIG } from "@phoenixaihub/agent-session-memory";
+
+// Defaults:
 {
-  categories: MemoryCategory[];  // what to remember
-  retentionDays: number;         // max age (default: 90)
-  maxMemories: number;           // per agent (default: 1000)
-  pruneThreshold: number;        // min importance (default: 0.05)
-  decayHalfLifeDays: number;     // decay speed (default: 14)
-  accessBoost: number;           // per access (default: 1.3)
+  retentionDays: 90,
+  maxMemories: 1000,
+  pruneThreshold: 0.05,
+  decayHalfLifeDays: 14,
+  accessBoost: 1.3,
+  storagePath: ".agent-memory",
 }
 ```
 
